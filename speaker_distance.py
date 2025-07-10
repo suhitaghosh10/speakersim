@@ -1,11 +1,13 @@
 import shutil
 
-from speechbrain.pretrained import SpeakerRecognition
+#from speechbrain.pretrained import SpeakerRecognition
 import torchaudio
 from collections import defaultdict
 import os
 import torch
 from scipy.spatial.distance import pdist, squareform
+import torch.nn.functional as F
+from scipy.spatial.distance import mahalanobis
 
 import itertools
 
@@ -47,13 +49,6 @@ def get_distance_matrix(embeddings:dict):
     embedding_matrix = np.stack([embeddings[s] for s in speaker_names])
     distance_matrix = squareform(pdist(embedding_matrix, metric='cosine'))  # or 'euclidean'
     return distance_matrix
-
-# def get_heatmap(distance_matrix, speaker_names:list):
-#
-#     plt.figure(figsize=(12, 10))
-#     sns.heatmap(distance_matrix, xticklabels=speaker_names, yticklabels=speaker_names, annot=True, cmap="viridis")
-#     plt.title("Speaker Distance Matrix (Cosine)")
-#     plt.show()
 
 def pca(embedding_matrix, speaker_names):
     # Use PCA first to reduce noise
@@ -97,7 +92,7 @@ def create_speaker_audio_dict(directory):
 
     return dict(speaker_dict)
 
-def compute_average_inter_speaker_distances(embeddings):
+def compute_average_inter_speaker_distances(embeddings, dist_measure='cosine'):
     distance_accumulator = defaultdict(list)
     speakers = list(embeddings.keys())
 
@@ -107,9 +102,11 @@ def compute_average_inter_speaker_distances(embeddings):
 
         for i in range(emb1.size(0)):
             for j in range(emb2.size(0)):
-                dist = torch.nn.functional.pairwise_distance(
-                    emb1[i].unsqueeze(0), emb2[j].unsqueeze(0)
-                ).item()
+                if dist_measure == 'p2':
+                    dist = F.pairwise_distance( emb1[i].unsqueeze(0), emb2[j].unsqueeze(0) ).item()
+                if dist_measure == 'cosine':
+                    dist = F.cosine_similarity(emb1[i].unsqueeze(0), emb2[j].unsqueeze(0)).item()
+
                 distance_accumulator[(spk1, spk2)].append(dist)
         print(spk1, spk2)
 
@@ -120,6 +117,31 @@ def compute_average_inter_speaker_distances(embeddings):
     }
 
     return avg_distances
+
+
+def compute_mahalanobis_distances(embeddings):
+    means = {}
+    all_embs = []
+
+    for speaker, tensor in embeddings.items():
+        emb = tensor.numpy()
+        means[speaker] = np.mean(emb, axis=0)
+        all_embs.append(emb)
+
+    # Use pooled covariance over all speakers
+    pooled_cov = np.cov(np.concatenate(all_embs, axis=0).T)
+    inv_cov = np.linalg.pinv(pooled_cov)
+
+    maha_dists = {}
+    speakers = list(embeddings.keys())
+
+    for spk1, spk2 in itertools.combinations(speakers, 2):
+        m1 = means[spk1]
+        m2 = means[spk2]
+        d = mahalanobis(m1, m2, inv_cov)
+        maha_dists[(spk1, spk2)] = d
+
+    return maha_dists
 
 def create_speaker_audio_dict(directory):
     speaker_dict = defaultdict(list)
@@ -165,6 +187,9 @@ def interactive_speaker_audio_plot(embeddings_dict, speaker_audio_dict):
     fig.update_layout(title="Speaker Embeddings with Audio Playback", hovermode='closest')
     fig.show()
 
+def average_embeddings(embeddings_dict):
+        return {spk: emb.mean(dim=0) for spk, emb in embeddings_dict.items()}
+
 if __name__ == '__main__':
     os.environ['HTTP_PROXY'] = 'http://fp.cs.ovgu.de:3210/'
     os.environ['HTTPS_PROXY'] = 'http://fp.cs.ovgu.de:3210/'
@@ -175,18 +200,18 @@ if __name__ == '__main__':
     # emb = get_embeddings(speaker_audio_dict, '/project/sghosh/')
     # print(len(emb))
     # torch.save(emb, "speaker_embeddings.pt")
-    # avg_emb = compute_average_inter_speaker_distances(torch.load("speaker_embeddings.pt"))
-    # torch.save(avg_emb, "avg_speaker_embeddings_dist.pt")
-    #create_speaker_audio_dict(audio_dir)
-    speaker_audio_dict = create_speaker_audio_dict('/data/share/speech/vctk/wav48_silence_trimmed/')
+    # avg_emb = compute_average_inter_speaker_distances(torch.load("speaker_embeddings.pt"),
+    #                                                   dist_measure='cosine')
+    # torch.save(avg_emb, "avg_speaker_embeddings_cosine_dist.pt")
 
-    embeddings_raw = torch.load("/project/sghosh/code/anti-stotter/speakerdistance/speaker_embeddings.pt")
+    avg_emb = compute_mahalanobis_distances(torch.load("speaker_embeddings.pt"))
+    torch.save(avg_emb, "avg_speaker_embeddings_maha_dist.pt")
 
-
-    def average_embeddings(embeddings_dict):
-        return {spk: emb.mean(dim=0) for spk, emb in embeddings_dict.items()}
-
-
-    embeddings_avg = average_embeddings(embeddings_raw)
-
-    interactive_speaker_audio_plot(embeddings_avg, speaker_audio_dict)
+    # create_speaker_audio_dict(audio_dir)
+    # speaker_audio_dict = create_speaker_audio_dict('/data/share/speech/vctk/wav48_silence_trimmed/')
+    #
+    # embeddings_raw = torch.load("/project/sghosh/code/anti-stotter/speakerdistance/speaker_embeddings.pt")
+    #
+    # embeddings_avg = average_embeddings(embeddings_raw)
+    #
+    # interactive_speaker_audio_plot(embeddings_avg, speaker_audio_dict)
